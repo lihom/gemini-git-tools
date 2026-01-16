@@ -80,7 +80,7 @@ sh ./scripts/gemini_commit.sh [options]
 | --- | --- | --- |
 | `--prompt` | `"text"` | Provide a direct, one-line instruction to the AI (e.g., "Focus on security"). |
 | `--prompt-file` | `path/to/file` | Load a complex set of review rules or a checklist from a text file. |
-| `--model` | `model_name` | Specify which Gemini model to use (Default: `gemini-2.5-pro`). |
+| `--model` | `model_name` | Specify which Gemini model to use (Default: `gemini-3-flash-preview`). |
 
 **Model Options**
 | Model | Description |
