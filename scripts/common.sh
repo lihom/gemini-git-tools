@@ -11,7 +11,7 @@ validate_input_safety() {
     for var in "$@"; do
         # Use case for robust character matching without complex escaping issues
         case "$var" in
-            *[";\"'\\\`\$&|><()"]*)
+            *[";\`\$&|><"]*)
                 echo "❌ Error: Invalid characters in arguments."
                 exit 1
                 ;;
