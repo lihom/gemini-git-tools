@@ -10,7 +10,7 @@ CUSTOM_TASK="general review"
 NON_INTERACTIVE=false
 
 while [[ "$#" -gt 0 ]]; do
-  case $1 in
+  case "$1" in
     --prompt) 
       validate_arg_value "$1" "$2"
       CUSTOM_TASK="$2"; shift ;;
@@ -44,23 +44,24 @@ else
   fi
 fi
 
-# Input Safety Validation
-validate_input_safety "$DIFF_COMMIT_ID_OR_BRANCH" "$MODEL" "$CUSTOM_TASK"
+# Input Safety Validation - Include EXCLUDE_PATTERN
+validate_input_safety "$DIFF_COMMIT_ID_OR_BRANCH" "$MODEL" "$CUSTOM_TASK" "$EXCLUDE_PATTERN"
 
-STAGED_DIFF=$(git diff "$DIFF_COMMIT_ID_OR_BRANCH" "$EXCLUDE_PATTERN")
-
-# If no changes are staged, exit early
-if [ -z "$STAGED_DIFF" ]; then
+# Check if there are any changes to review (efficiently)
+if ! get_git_diff "$DIFF_COMMIT_ID_OR_BRANCH" "$EXCLUDE_PATTERN" | grep -q .; then
+  echo "✅ No changes detected to review."
   exit 0
 fi
 
 echo "🤖 $MODEL is reviewing your changes..."
 
-# 3. Define the prompt
-PROMPT="You are a Senior Code Reviewer. 
+# 3. Construct the prompt safely in parts to avoid shell expansion of the diff (ARG_MAX)
+TMP_PROMPT=$(mktemp) || exit 1
+# Ensure cleanup on exit or interruption
+trap 'rm -f "$TMP_PROMPT"' EXIT INT TERM
 
-### CONTEXT
-Your specific task for this session is: **$CUSTOM_TASK**
+cat <<'EOF' > "$TMP_PROMPT"
+You are a Senior Code Reviewer. 
 
 ### REVIEW SCOPE
 Analyze the provided Git Diff focusing on:
@@ -85,38 +86,49 @@ Analyze the provided Git Diff focusing on:
 1. NO LEADING WHITESPACE: Every issue line must start at the very beginning of the line (Column 0).
 2. NO INDENTATION: Do not use spaces, tabs, or any padding before the word "ISSUE:".
 
-### EXAMPLE OF INCORRECT FORMAT (DO NOT DO THIS):
-**ISSUE:** [HIGH] - Potential memory leak... (WRONG: Contains bolding)
-* ISSUE: [LOW] - Spelling error... (WRONG: Contains bullet points)
-
 ### Template for each issue:
-ISSUE: [CRITICAL/HIGH/MEDIUM/LOW] - [Short Description]
-File: \`path/to/file/name.ext\`
-Priority: [P0/P1/P2/P3]
+ISSUE: [LEVEL] - [Short Description]
+File: `path/to/file/name.ext`
+Priority: P[0-3]
 * Explanation: Detailed explanation of the root cause.
 * Suggestion: Concrete steps to fix the issue.
 * Comparison:
 [Original Code]
-\`\`\`[language]
+```[language]
 // Snippet of the current problematic code
-\`\`\`
+```
 
 [Suggested Fix]
-\`\`\`[language]
+```[language]
 // The corrected code snippet
-\`\`\`
+```
 
 ---
-Git Diff to Review:
-$STAGED_DIFF"
+EOF
 
-# 4. Send to Gemini and capture response
-# We use the 'instruct' variant for better adherence to the prompt
-REVIEW_RESULT=$(gemini -m "$MODEL" -p "$PROMPT")
+# Append dynamic parts safely - Stream diff directly to prevent ARG_MAX issues
+{
+  printf "\n### CONTEXT\nYour specific task for this session is: %s\n" "$CUSTOM_TASK"
+  printf "\nGit Diff to Review:\n"
+  get_git_diff "$DIFF_COMMIT_ID_OR_BRANCH" "$EXCLUDE_PATTERN"
+} >> "$TMP_PROMPT"
+
+# Check if diff was actually added (efficiency)
+# We check the size of the file after appending the diff
+# The template is ~1500 bytes. If it's still small and the diff part is empty, we might want to exit.
+# But git diff --cached might return empty even if staged files exist (if no changes).
+# Better to check if the diff portion specifically has content.
+
+# 4. Send to Gemini using stdin redirection
+REVIEW_RESULT=$(gemini -m "$MODEL" < "$TMP_PROMPT")
+
+# Check for empty response
+if [ -z "$REVIEW_RESULT" ]; then
+  echo "❌ Error: Gemini failed to generate a review response."
+  exit 1
+fi
 
 # Find the first line containing a non-whitespace character.
-# Apply ltrim (remove leading whitespace) to that line.
-# Print all subsequent lines (including indentation).
 REVIEW=$(echo "$REVIEW_RESULT" | awk '
   !found && /^[[:space:]]*$/ { next }
   !found { sub(/^[[:space:]]+/, ""); found=1 }
@@ -143,52 +155,25 @@ echo "  🟡 Medium Severity: $mediumCount"
 echo "  🟢 Low Severity: $lowCount"
 echo ""
 
-# Check if the review was approved (should only happen when no issues found)
-if [ "$criticalCount" -eq 0 ] && [ "$highCount" -eq 0 ]; then
+# 5. Logic for block/approve
+if [ "$criticalCount" -gt 0 ] || [ "$highCount" -gt 0 ] || [ "$mediumCount" -ge 3 ]; then
+  [ "$criticalCount" -gt 0 ] && echo "🚫 COMMIT BLOCKED: Critical issues found ($criticalCount)."
+  [ "$highCount" -gt 0 ] && echo "🚫 COMMIT BLOCKED: High severity issues found ($highCount)."
+  [ "$mediumCount" -ge 3 ] && echo "⚠️  COMMIT BLOCKED: Too many medium issues ($mediumCount found)."
+  echo ""
+  echo " ✗ COMMIT REJECTED ✗ "
+  exit 1
+elif [ "$criticalCount" -eq 0 ] && [ "$highCount" -eq 0 ] && [ "$mediumCount" -eq 0 ]; then
   echo "✅ Excellent! Code follows best practices."
   echo ""
-  echo "🎉 Commit approved! Keep up the good coding practices!"
-  echo ""
-  echo " ✓ COMMIT WILL PROCEED ✓ "
-  exit 0
-fi
-
-# Block commits based on NEW severity rules
-if [ "$criticalCount" -gt 0 ]; then
-  echo "🚫 COMMIT BLOCKED: Critical issues found ($criticalCount). Fix them before committing."
-  echo ""
-  echo " ✗ COMMIT REJECTED ✗ "
-  exit 1
-elif [ "$highCount" -gt 0 ]; then
-  echo "🚫 COMMIT BLOCKED: High severity issues found ($highCount). Must be resolved."
-  echo ""
-  echo " ✗ COMMIT REJECTED ✗ "
-  exit 1
-elif [ "$mediumCount" -ge 3 ]; then
-  echo "⚠️  COMMIT BLOCKED: Too many medium issues ($mediumCount found). Please address some before committing."
-  echo "   To override, use: git commit --no-verify"
-  echo ""
-  echo " ✗ COMMIT REJECTED ✗ "
-  exit 1
-elif [ "$mediumCount" -gt 0 ]; then
-  echo "⚠️  Medium severity issues detected ($mediumCount found). Consider fixing, but commit allowed."
-  echo ""
-  echo "🎉 Commit approved with minor concerns!"
-  echo ""
-  echo " ✓ COMMIT WILL PROCEED ✓ "
-  exit 0
-elif [ "$lowCount" -gt 0 ]; then
-  echo "✅ Minor improvements suggested ($lowCount found). Good code quality overall."
-  echo ""
-  echo "🎉 Commit approved! Keep up the good coding practices!"
+  echo "🎉 Code review completed. No significant issues found. Commit approved!"
   echo ""
   echo " ✓ COMMIT WILL PROCEED ✓ "
   exit 0
 else
-  # No issues found but also no explicit approval (shouldn't happen with updated prompt)
-  echo "✅ Code review completed. No blocking issues found."
+  echo "⚠️  Minor issues detected (Medium: $mediumCount, Low: $lowCount). Consider fixing, but commit allowed."
   echo ""
-  echo "🎉 Commit approved! Keep up the good coding practices!"
+  echo "🎉 Commit approved with minor concerns!"
   echo ""
   echo " ✓ COMMIT WILL PROCEED ✓ "
   exit 0
