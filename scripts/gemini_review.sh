@@ -1,14 +1,21 @@
 #!/bin/bash
 
+# Source common logic
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
 # 1. Parse arguments
-MODEL="gemini-3-flash-preview"
+MODEL="$DEFAULT_MODEL"
 CUSTOM_TASK="general review"
+NON_INTERACTIVE=false
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --prompt) 
-      CUSTOM_TASK=$(echo "$2" | sed 's/[;\"`$&]/ /g'); shift ;;
+      validate_arg_value "$1" "$2"
+      CUSTOM_TASK="$2"; shift ;;
     --prompt-file) 
+      validate_arg_value "$1" "$2"
       if [[ -f "$2" ]]; then
         CUSTOM_TASK=$(cat "$2")
       else
@@ -17,20 +24,30 @@ while [[ "$#" -gt 0 ]]; do
       fi
       shift ;;
     --model)  
+      validate_arg_value "$1" "$2"
       MODEL="$2"; shift ;;
+    --non-interactive)
+      NON_INTERACTIVE=true ;;
     *) echo "❌ Error: Invalid parameter: $1"; exit 1 ;;
   esac
   shift
 done
 
 # 2. Get the staged changes (diff)
-read -p "please enter your diff commit id or branch: " DIFF_COMMIT_ID_OR_BRANCH
-
-if [ -z "$DIFF_COMMIT_ID_OR_BRANCH" ]; then
+if [ "$NON_INTERACTIVE" = true ]; then
   DIFF_COMMIT_ID_OR_BRANCH="--cached"
+else
+  read -p "please enter your diff commit id or branch: " DIFF_COMMIT_ID_OR_BRANCH
+
+  if [ -z "$DIFF_COMMIT_ID_OR_BRANCH" ]; then
+    DIFF_COMMIT_ID_OR_BRANCH="--cached"
+  fi
 fi
 
-STAGED_DIFF=$(git diff $DIFF_COMMIT_ID_OR_BRANCH ":(exclude)package-lock.json")
+# Input Safety Validation
+validate_input_safety "$DIFF_COMMIT_ID_OR_BRANCH" "$MODEL" "$CUSTOM_TASK"
+
+STAGED_DIFF=$(git diff "$DIFF_COMMIT_ID_OR_BRANCH" "$EXCLUDE_PATTERN")
 
 # If no changes are staged, exit early
 if [ -z "$STAGED_DIFF" ]; then
@@ -127,7 +144,7 @@ echo "  🟢 Low Severity: $lowCount"
 echo ""
 
 # Check if the review was approved (should only happen when no issues found)
-if echo "$REVIEW" | [ "$criticalCount" -eq 0 ] && [ "$highCount" -eq 0 ]; then
+if [ "$criticalCount" -eq 0 ] && [ "$highCount" -eq 0 ]; then
   echo "✅ Excellent! Code follows best practices."
   echo ""
   echo "🎉 Commit approved! Keep up the good coding practices!"
