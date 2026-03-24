@@ -2,7 +2,7 @@
 
 # Shared configuration
 # You can override these via environment variables
-EXCLUDE_PATTERN="${GEMINI_EXCLUDE_PATTERN:-}"
+EXCLUDE_PATTERN="${GEMINI_EXCLUDE_PATTERN:-":(exclude)package-lock.json" ":(exclude)pnpm-lock.yaml"}"
 DEFAULT_MODEL="${GEMINI_MODEL:-gemini-3-flash-preview}"
 
 # Centralized input safety validation
