@@ -29,13 +29,5 @@ validate_arg_value() {
 
 # Centralized git diff retrieval
 get_git_diff() {
-    local target="$1"
-    local pattern="$2"
-    if [ -n "$pattern" ]; then
-        # Use -- to ensure pattern parts are treated as pathspecs, not flags
-        # Quote "$pattern" to ensure Git handles globbing, not the shell
-        git diff "$target" -- "$pattern"
-    else
-        git diff "$target"
-    fi
+    git diff ${@}
 }
